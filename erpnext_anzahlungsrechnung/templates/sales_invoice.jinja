@@ -75,6 +75,11 @@
 					<td class="text-right">{{ frappe.utils.formatdate(performance_from, date_format) }} - {{
 						frappe.utils.formatdate(performance_to, "dd.mm.yyyy") }}</td>
 				</tr>
+			{% elif performance_from %}
+				<tr>
+					<td>{{ _("Performance Period") }}:</td>
+					<td class="text-right">{{ frappe.utils.formatdate(performance_from, "MMMM yyyy") }}</td>
+				</tr>
 			{% endif %}
 		</table>
 	</div>
@@ -162,6 +167,11 @@
 								{% endif %}
 								{{ frappe.utils.formatdate(n.custom_service_period_from, item_date_format) }} - {{
 									frappe.utils.formatdate(n.custom_service_period_to, "dd.mm.yyyy") }}
+							</span>
+						{% elif n.custom_service_period_from %}
+							<br>
+							<span class="text-small">
+								{{ _("Performance Period") }}: {{ frappe.utils.formatdate(n.custom_service_period_from, "MMMM yyyy") }}
 							</span>
 						{% endif %}
 					</td>

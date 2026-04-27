@@ -3,9 +3,14 @@ from collections import defaultdict
 import frappe
 from frappe import _
 from frappe.query_builder import DocType
-from frappe.utils import cint, flt, getdate
+from frappe.utils import cint, flt
 from frappe.utils.formatters import format_value
 
+from erpnext_anzahlungsrechnung.scripts.service_period_utils import (
+	get_item_service_period_bounds,
+	sync_standard_period_fields_from_custom,
+	validate_service_period_ranges,
+)
 from erpnext_anzahlungsrechnung.scripts.utils import (
 	aggregate_income_by_account,
 	append_je_row,
@@ -21,6 +26,7 @@ from erpnext_anzahlungsrechnung.scripts.utils import (
 
 def before_validate(doc, event):
 	_sync_service_period_fields(doc)
+	validate_service_period_ranges(doc)
 	validate_consistent_currency(doc)
 	validate_sales_order_consistency(doc)
 	append_down_payment_invoice_to_final_invoice(doc)
@@ -83,32 +89,7 @@ def _derive_service_period_from_invoice_item_rows(doc):
 
 
 def _sync_standard_invoice_period_fields(doc):
-	item_from_date, item_to_date = _get_item_service_period_bounds(doc.items)
-
-	if doc.custom_service_period_from:
-		doc.from_date = doc.custom_service_period_from
-	elif item_from_date and not doc.from_date:
-		doc.from_date = item_from_date
-
-	if doc.custom_service_period_to:
-		doc.to_date = doc.custom_service_period_to
-	elif item_to_date and not doc.to_date:
-		doc.to_date = item_to_date
-
-
-def _get_item_service_period_bounds(items):
-	from_dates = []
-	to_dates = []
-
-	for item in items or []:
-		if item.custom_service_period_from:
-			from_dates.append(getdate(item.custom_service_period_from))
-		if item.custom_service_period_to:
-			to_dates.append(getdate(item.custom_service_period_to))
-
-	item_from_date = min(from_dates) if from_dates else None
-	item_to_date = max(to_dates) if to_dates else None
-	return item_from_date, item_to_date
+	sync_standard_period_fields_from_custom(doc)
 
 
 def validate(doc, event):

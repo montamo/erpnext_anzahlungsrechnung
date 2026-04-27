@@ -1,7 +1,10 @@
 import frappe
 from frappe import _
-from frappe.utils import flt, getdate
+from frappe.utils import flt
 
+from erpnext_anzahlungsrechnung.scripts.service_period_utils import (
+	sync_standard_period_fields_from_custom,
+)
 
 def before_print(doc, method, print_settings):
 	prepare_invoice_data_according_to_invoice_type(doc)
@@ -58,32 +61,7 @@ def _prepare_final_invoice_data(doc):
 
 
 def _sync_service_period_fields_for_print(doc):
-	item_from_date, item_to_date = _get_item_service_period_bounds(doc.items)
-
-	if doc.custom_service_period_from:
-		doc.from_date = doc.custom_service_period_from
-	elif item_from_date and not doc.from_date:
-		doc.from_date = item_from_date
-
-	if doc.custom_service_period_to:
-		doc.to_date = doc.custom_service_period_to
-	elif item_to_date and not doc.to_date:
-		doc.to_date = item_to_date
-
-
-def _get_item_service_period_bounds(items):
-	from_dates = []
-	to_dates = []
-
-	for item in items or []:
-		if item.custom_service_period_from:
-			from_dates.append(getdate(item.custom_service_period_from))
-		if item.custom_service_period_to:
-			to_dates.append(getdate(item.custom_service_period_to))
-
-	item_from_date = min(from_dates) if from_dates else None
-	item_to_date = max(to_dates) if to_dates else None
-	return item_from_date, item_to_date
+	sync_standard_period_fields_from_custom(doc)
 
 
 def _add_tax_rates_to_items(doc):
