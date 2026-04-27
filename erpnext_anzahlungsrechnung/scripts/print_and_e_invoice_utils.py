@@ -1,10 +1,11 @@
 import frappe
 from frappe import _
-from frappe.utils import flt
+from frappe.utils import flt, getdate
 
 
 def before_print(doc, method, print_settings):
 	prepare_invoice_data_according_to_invoice_type(doc)
+	_sync_service_period_fields_for_print(doc)
 
 
 def prepare_invoice_data_according_to_invoice_type(doc):
@@ -44,10 +45,45 @@ def _prepare_final_invoice_data(doc):
 	doc.set("items", sales_order.items)
 	doc.set("taxes", sales_order.taxes)
 	doc.set("item_wise_tax_details", sales_order.item_wise_tax_details)
+	if not doc.custom_service_period_from and sales_order.custom_service_period_from:
+		doc.custom_service_period_from = sales_order.custom_service_period_from
+	if not doc.custom_service_period_to and sales_order.custom_service_period_to:
+		doc.custom_service_period_to = sales_order.custom_service_period_to
+	doc.total = sales_order.total
 	doc.net_total = sales_order.net_total
 	doc.grand_total = sales_order.grand_total
+	doc.base_total = sales_order.base_total
 	doc.base_net_total = sales_order.base_net_total
 	doc.base_grand_total = sales_order.base_grand_total
+
+
+def _sync_service_period_fields_for_print(doc):
+	item_from_date, item_to_date = _get_item_service_period_bounds(doc.items)
+
+	if doc.custom_service_period_from:
+		doc.from_date = doc.custom_service_period_from
+	elif item_from_date and not doc.from_date:
+		doc.from_date = item_from_date
+
+	if doc.custom_service_period_to:
+		doc.to_date = doc.custom_service_period_to
+	elif item_to_date and not doc.to_date:
+		doc.to_date = item_to_date
+
+
+def _get_item_service_period_bounds(items):
+	from_dates = []
+	to_dates = []
+
+	for item in items or []:
+		if item.custom_service_period_from:
+			from_dates.append(getdate(item.custom_service_period_from))
+		if item.custom_service_period_to:
+			to_dates.append(getdate(item.custom_service_period_to))
+
+	item_from_date = min(from_dates) if from_dates else None
+	item_to_date = max(to_dates) if to_dates else None
+	return item_from_date, item_to_date
 
 
 def _add_tax_rates_to_items(doc):
