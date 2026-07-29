@@ -2,7 +2,7 @@ import frappe
 from frappe import _
 from frappe.query_builder import DocType
 from frappe.query_builder.functions import Min
-from frappe.utils import cint, flt
+from frappe.utils import cint, flt, getdate
 from frappe.utils.formatters import format_value
 
 from erpnext_anzahlungsrechnung.erpnext_anzahlungsrechnung.doctype.down_payment_invoice.down_payment_invoice_accounting import (
@@ -384,57 +384,164 @@ def _ensure_final_invoice_completes_sales_order_positions(doc):
 		frappe.throw(error_message)
 
 
-def append_down_payment_invoice_to_final_invoice(doc):
-	if doc.custom_invoice_type != "Final Invoice" or doc.is_return:
-		return
+def get_prior_down_payment_invoices_for_final_invoice(doc):
+	"""Return submitted down payment invoices for a Final Invoice.
 
-	dpi = DocType("Down Payment Invoice")
+	The standard case is an exact Sales Order match. If no DPI is linked to the
+	current Sales Order, fall back to the same customer/company/project. This covers
+	migrated or recreated Sales Orders that still belong to the same project.
+	"""
+	sales_orders = _get_linked_sales_orders(doc)
+	down_payment_invoices = _get_submitted_down_payment_invoices_for_sales_orders(sales_orders)
+	if down_payment_invoices:
+		return down_payment_invoices
 
-	down_payment_invoices = (
-		frappe.qb.from_(dpi)
-		.select(
-			dpi.name,
-			dpi.posting_date,
-			dpi.down_payment_amount,
-		)
-		.where((dpi.sales_order == doc.items[0].sales_order) & (dpi.docstatus == 1))
-		.orderby(dpi.posting_date)
-		.orderby(dpi.creation)
-	).run(as_dict=True)
+	project = _get_final_invoice_project(doc, sales_orders)
+	return _get_submitted_down_payment_invoices_for_project(doc, project)
+
+
+def _get_linked_sales_orders(doc) -> list[str]:
+	seen = set()
+	sales_orders = []
+	for item in doc.get("items") or []:
+		sales_order = item.get("sales_order")
+		if sales_order and sales_order not in seen:
+			seen.add(sales_order)
+			sales_orders.append(sales_order)
+	return sales_orders
+
+
+def _get_submitted_down_payment_invoices_for_sales_orders(sales_orders: list[str]) -> list[dict]:
+	if not sales_orders:
+		return []
+	return frappe.get_all(
+		"Down Payment Invoice",
+		filters={"sales_order": ["in", sales_orders], "docstatus": 1},
+		fields=["name", "posting_date", "down_payment_amount", "sales_order"],
+		order_by="posting_date asc, creation asc",
+	)
+
+
+def _get_final_invoice_project(doc, sales_orders: list[str]) -> str | None:
+	if doc.get("project"):
+		return doc.project
+	for sales_order in sales_orders:
+		project = frappe.db.get_value("Sales Order", sales_order, "project")
+		if project:
+			return project
+	return None
+
+
+def _get_submitted_down_payment_invoices_for_project(doc, project: str | None) -> list[dict]:
+	if not (project and doc.get("customer")):
+		return []
+
+	filters = {"customer": doc.customer, "docstatus": 1}
+	if doc.get("company"):
+		filters["company"] = doc.company
+
+	rows = frappe.get_all(
+		"Down Payment Invoice",
+		filters=filters,
+		fields=["name", "posting_date", "down_payment_amount", "sales_order"],
+		order_by="posting_date asc, creation asc",
+	)
+
+	return [row for row in rows if _get_down_payment_invoice_project(row) == project]
+
+
+def _get_down_payment_invoice_project(row) -> str | None:
+	if _down_payment_invoice_has_custom_project():
+		project = frappe.db.get_value("Down Payment Invoice", row.name, "custom_project")
+		if project:
+			return project
+	if row.get("sales_order"):
+		return frappe.db.get_value("Sales Order", row.sales_order, "project")
+	return None
+
+
+def _down_payment_invoice_has_custom_project() -> bool:
+	if hasattr(frappe.db, "has_column"):
+		return frappe.db.has_column("Down Payment Invoice", "custom_project")
+	return any(df.fieldname == "custom_project" for df in frappe.get_meta("Down Payment Invoice").fields)
+
+
+def _get_first_payment_date_by_down_payment_invoice(invoice_names: list[str]) -> dict[str, object]:
+	if not invoice_names:
+		return {}
 
 	ple = DocType("Payment Ledger Entry")
-	invoice_names = [row.name for row in down_payment_invoices]
-	first_payment_date_by_dpi = {}
-	if invoice_names:
-		for row in (
-			frappe.qb.from_(ple)
-			.select(ple.against_voucher_no, Min(ple.posting_date).as_("payment_date"))
-			.where(
-				(ple.against_voucher_type == "Down Payment Invoice")
-				& (ple.against_voucher_no.isin(invoice_names))
-				& (ple.delinked == 0)
-				& (ple.account_type == "Receivable")
-				& (ple.amount < 0)
-			)
-			.groupby(ple.against_voucher_no)
-		).run(as_dict=True):
-			first_payment_date_by_dpi[row.against_voucher_no] = row.payment_date
-
-	so_name = doc.items[0].sales_order
-	first_so_payment_date = None
-	so_pay_rows = (
+	payment_dates = {}
+	for row in (
 		frappe.qb.from_(ple)
-		.select(Min(ple.posting_date).as_("payment_date"))
+		.select(ple.against_voucher_no, Min(ple.posting_date).as_("payment_date"))
 		.where(
-			(ple.against_voucher_type == "Sales Order")
-			& (ple.against_voucher_no == so_name)
+			(ple.against_voucher_type == "Down Payment Invoice")
+			& (ple.against_voucher_no.isin(invoice_names))
 			& (ple.delinked == 0)
 			& (ple.account_type == "Receivable")
 			& (ple.amount < 0)
 		)
-	).run(as_dict=True)
-	if so_pay_rows and so_pay_rows[0].get("payment_date"):
-		first_so_payment_date = so_pay_rows[0]["payment_date"]
+		.groupby(ple.against_voucher_no)
+	).run(as_dict=True):
+		payment_dates[row.against_voucher_no] = row.payment_date
+	return payment_dates
+
+
+def _get_first_payment_date_by_sales_order(sales_orders: list[str]) -> dict[str, object]:
+	if not sales_orders:
+		return {}
+
+	ple = DocType("Payment Ledger Entry")
+	payment_dates = {}
+	for row in (
+		frappe.qb.from_(ple)
+		.select(ple.against_voucher_no, Min(ple.posting_date).as_("payment_date"))
+		.where(
+			(ple.against_voucher_type == "Sales Order")
+			& (ple.against_voucher_no.isin(sales_orders))
+			& (ple.delinked == 0)
+			& (ple.account_type == "Receivable")
+			& (ple.amount < 0)
+		)
+		.groupby(ple.against_voucher_no)
+	).run(as_dict=True):
+		payment_dates[row.against_voucher_no] = row.payment_date
+	return payment_dates
+
+
+def _get_first_allocated_payment_entry_date(doc):
+	payment_entry_names = [
+		row.reference_name
+		for row in doc.get("advances") or []
+		if row.reference_type == "Payment Entry" and row.reference_name and flt(row.allocated_amount) > 0
+	]
+	if not payment_entry_names:
+		return None
+
+	payment_dates = []
+	for row in frappe.get_all(
+		"Payment Entry",
+		filters={"name": ["in", payment_entry_names]},
+		fields=["reference_date", "posting_date"],
+	):
+		payment_date = row.reference_date or row.posting_date
+		if payment_date:
+			payment_dates.append(getdate(payment_date))
+	return min(payment_dates) if payment_dates else None
+
+
+def append_down_payment_invoice_to_final_invoice(doc):
+	if doc.custom_invoice_type != "Final Invoice" or doc.is_return:
+		return
+
+	down_payment_invoices = get_prior_down_payment_invoices_for_final_invoice(doc)
+	invoice_names = [row.name for row in down_payment_invoices]
+	first_payment_date_by_dpi = _get_first_payment_date_by_down_payment_invoice(invoice_names)
+	first_payment_date_by_sales_order = _get_first_payment_date_by_sales_order(
+		[row.sales_order for row in down_payment_invoices if row.get("sales_order")]
+	)
+	first_invoice_advance_payment_date = _get_first_allocated_payment_entry_date(doc)
 
 	doc.set("custom_down_payments", [])
 	for row in down_payment_invoices:
@@ -446,7 +553,9 @@ def append_down_payment_invoice_to_final_invoice(doc):
 			{
 				"invoice_no": row.name,
 				"date": row.posting_date,
-				"payment_date": first_payment_date_by_dpi.get(row.name) or first_so_payment_date,
+				"payment_date": first_payment_date_by_dpi.get(row.name)
+				or first_payment_date_by_sales_order.get(row.get("sales_order"))
+				or first_invoice_advance_payment_date,
 				"net_total": net_total,
 				"tax_amount": tax_amount,
 				"grand_total": row.down_payment_amount,

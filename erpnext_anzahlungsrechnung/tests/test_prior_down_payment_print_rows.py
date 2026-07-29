@@ -2,10 +2,18 @@
 # See license.txt
 
 from datetime import date
+from unittest.mock import patch
 
+import frappe
 from frappe.tests import UnitTestCase
 
-from erpnext_anzahlungsrechnung.scripts.print_and_e_invoice_utils import _build_allocated_print_rows
+from erpnext_anzahlungsrechnung.scripts.print_and_e_invoice_utils import (
+	_build_allocated_print_rows,
+	get_final_invoice_prior_down_payments,
+)
+from erpnext_anzahlungsrechnung.scripts.sales_invoice import (
+	get_prior_down_payment_invoices_for_final_invoice,
+)
 
 
 class TestPriorDownPaymentPrintRows(UnitTestCase):
@@ -128,3 +136,104 @@ class TestPriorDownPaymentPrintRows(UnitTestCase):
 
 		self.assertEqual(rows[0]["taxes"], pe_taxes["PE-1"])
 		self.assertIsNone(rows[1]["taxes"])
+
+
+class TestPriorDownPaymentInvoiceLookup(UnitTestCase):
+	def _final_invoice_doc(self, **kwargs):
+		defaults = {
+			"doctype": "Sales Invoice",
+			"name": "SINV-1",
+			"custom_invoice_type": "Final Invoice",
+			"customer": "CUS-1",
+			"company": "Company 1",
+			"project": "PROJ-1",
+			"items": [frappe._dict({"sales_order": "SO-NEW"})],
+		}
+		defaults.update(kwargs)
+		return frappe._dict(defaults)
+
+	def test_exact_sales_order_match_is_preferred(self):
+		dpi = frappe._dict(
+			{
+				"name": "AZ-EXACT",
+				"posting_date": date(2026, 6, 1),
+				"down_payment_amount": 100,
+				"sales_order": "SO-NEW",
+			}
+		)
+		with patch(
+			"erpnext_anzahlungsrechnung.scripts.sales_invoice.frappe.get_all",
+			return_value=[dpi],
+		) as mock_get_all:
+			rows = get_prior_down_payment_invoices_for_final_invoice(self._final_invoice_doc())
+
+		self.assertEqual([row.name for row in rows], ["AZ-EXACT"])
+		mock_get_all.assert_called_once()
+
+	def test_project_fallback_finds_down_payment_invoice_from_recreated_sales_order(self):
+		old_dpi = frappe._dict(
+			{
+				"name": "AZ-OLD",
+				"posting_date": date(2026, 6, 1),
+				"down_payment_amount": 100,
+				"sales_order": "SO-OLD",
+			}
+		)
+		other_project_dpi = frappe._dict(
+			{
+				"name": "AZ-OTHER",
+				"posting_date": date(2026, 6, 2),
+				"down_payment_amount": 200,
+				"sales_order": "SO-OTHER",
+			}
+		)
+
+		def fake_get_all(doctype, filters=None, fields=None, order_by=None):
+			if filters and filters.get("sales_order"):
+				return []
+			return [old_dpi, other_project_dpi]
+
+		def fake_get_value(doctype, name, fieldname):
+			if doctype == "Sales Order" and fieldname == "project":
+				return {"SO-OLD": "PROJ-1", "SO-OTHER": "PROJ-2"}.get(name)
+			return None
+
+		with (
+			patch(
+				"erpnext_anzahlungsrechnung.scripts.sales_invoice.frappe.get_all",
+				side_effect=fake_get_all,
+			),
+			patch(
+				"erpnext_anzahlungsrechnung.scripts.sales_invoice.frappe.db.get_value",
+				side_effect=fake_get_value,
+			),
+			patch(
+				"erpnext_anzahlungsrechnung.scripts.sales_invoice._down_payment_invoice_has_custom_project",
+				return_value=False,
+			),
+		):
+			rows = get_prior_down_payment_invoices_for_final_invoice(self._final_invoice_doc())
+
+		self.assertEqual([row.name for row in rows], ["AZ-OLD"])
+
+	def test_print_helper_uses_lookup_fallback_when_child_table_is_empty(self):
+		doc = self._final_invoice_doc(custom_down_payments=[], advances=[])
+		doc.precision = lambda fieldname: 2
+		dpi = frappe._dict(
+			{
+				"name": "AZ-OLD",
+				"posting_date": date(2026, 6, 1),
+				"down_payment_amount": 100,
+				"sales_order": "SO-OLD",
+			}
+		)
+
+		with patch(
+			"erpnext_anzahlungsrechnung.scripts.sales_invoice.get_prior_down_payment_invoices_for_final_invoice",
+			return_value=[dpi],
+		):
+			rows = get_final_invoice_prior_down_payments(doc)
+
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0]["invoice_no"], "AZ-OLD")
+		self.assertTrue(rows[0]["show_invoice_details"])

@@ -11,20 +11,26 @@ def get_final_invoice_prior_down_payments(doc) -> list[dict]:
 	if doc.custom_invoice_type != "Final Invoice":
 		return []
 
+	precision = doc.precision("grand_total")
 	dp_rows = doc.get("custom_down_payments") or []
-	if not dp_rows:
+	if dp_rows:
+		totals = [
+			{
+				"invoice_no": d.invoice_no,
+				"invoice_date": getdate(d.date),
+				"grand_total": flt(d.grand_total, precision),
+			}
+			for d in dp_rows
+		]
+	else:
+		totals = _get_fallback_down_payment_totals_for_final_invoice(doc, precision)
+
+	if not totals:
 		return []
 
-	precision = doc.precision("grand_total")
-	totals = [
-		{
-			"invoice_no": d.invoice_no,
-			"invoice_date": getdate(d.date),
-			"grand_total": flt(d.grand_total, precision),
-		}
-		for d in dp_rows
-	]
 	dpi_dates = [getdate(d.date) for d in dp_rows]
+	if not dpi_dates:
+		dpi_dates = [t["invoice_date"] for t in totals]
 	payments = _collect_advance_payments(doc, precision)
 	pe_meta = _load_payment_entry_dates([p["pe"] for p in payments])
 	for payment in payments:
@@ -35,6 +41,21 @@ def get_final_invoice_prior_down_payments(doc) -> list[dict]:
 	payments.sort(key=lambda p: (p["payment_date"] or "", p["posting_date"] or "", p["pe"]))
 	pe_taxes = {payment["pe"]: _load_taxes_for_payment_entry(payment["pe"]) for payment in payments}
 	return _build_allocated_print_rows(totals, dpi_dates, payments, precision, pe_taxes)
+
+
+def _get_fallback_down_payment_totals_for_final_invoice(doc, precision) -> list[dict]:
+	from erpnext_anzahlungsrechnung.scripts.sales_invoice import (
+		get_prior_down_payment_invoices_for_final_invoice,
+	)
+
+	return [
+		{
+			"invoice_no": row.name,
+			"invoice_date": getdate(row.posting_date),
+			"grand_total": flt(row.down_payment_amount, precision),
+		}
+		for row in get_prior_down_payment_invoices_for_final_invoice(doc)
+	]
 
 
 def _add_tax_rates_to_items(doc):
